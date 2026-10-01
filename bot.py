@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import os
-from typing import Set, Tuple
+import re
+from typing import Optional, Set, Tuple
 import aiohttp
 from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ChatAction
 from aiogram.filters import CommandStart
 from aiogram.types import Message
+from aiogram.utils.chat_action import ChatActionSender
 
 # Настройка логирования
 logging.basicConfig(
@@ -16,7 +17,10 @@ logging.basicConfig(
 
 QUESTION_TEXT = (
     "Сколько нужно сгенерировать постов "
-    "(от 1 до 10, значительно дешевле 1 раз 10 постов чем 10 раз по 1 посту)?"
+    "(от 1 до 10, значительно дешевле 1 раз 10 постов чем 10 раз по 1 посту)?\n\n"
+    "Если есть пожелания по теме, можно написать их через пробел или с новой строки после цифры, "
+    "например:\n"
+    "«3 скоро Хэллоуин, придумай что-нибудь под такую атмосферу»"
 )
 
 # Очередь моделей: если первая перегружена или недоступна, переходит к следующей
@@ -71,6 +75,17 @@ def load_dataset(dataset_path: str = "dataset.txt") -> str:
         return f.read()
 
 
+def parse_user_input(text: str) -> Tuple[Optional[int], str]:
+    """
+    Извлекает из строки число постов и опциональные пожелания к генерации.
+    Поддерживает ввод вида '3', '3 тема...', '3\\nмногострочный текст'.
+    """
+    match = re.match(r"^(\d+)(?:\s+(.*))?$", text.strip(), re.DOTALL)
+    if not match:
+        return None, ""
+    return int(match.group(1)), (match.group(2) or "").strip()
+
+
 async def request_gemini(prompt: str, ai_token: str) -> str:
     """
     Последовательно опрашивает модели из списка GEMINI_MODELS.
@@ -120,7 +135,6 @@ async def send_chunked_message(message: Message, text: str, max_length: int = 40
 
 
 async def main():
-    # Загрузка конфигурации
     ai_token, tg_token, allowed_ids = load_config("tokens.env")
     logging.info(f"Загружено разрешенных ID: {len(allowed_ids)}")
 
@@ -140,44 +154,43 @@ async def main():
     async def handle_text(message: Message):
         user_id = message.from_user.id if message.from_user else None
 
-        # Проверка безопасности
         if user_id not in allowed_ids:
             await message.answer("Access Denied")
             return
 
         user_input = message.text.strip()
+        n, user_add = parse_user_input(user_input)
 
-        # Валидация введенного значения
-        try:
-            n = int(user_input)
-        except ValueError:
-            error_reason = f"Значение «{user_input}» не является целым числом."
-            await message.answer(f"{error_reason}\nПожалуйста, введите целое число от 1 до 10.\n\n{QUESTION_TEXT}")
+        # Валидация числа постов
+        if n is None or n < 1 or n > 10:
+            error_reason = (
+                f"Не удалось распознать корректное число постов в начале вашего сообщения.\n"
+                f"Пожалуйста, укажите целое число от 1 до 10 (пожелания можно дописать следом)."
+            )
+            await message.answer(f"{error_reason}\n\n{QUESTION_TEXT}")
             return
 
-        if n < 1 or n > 10:
-            error_reason = f"Число {n} вне допустимого диапазона (должно быть от 1 до 10 включительно)."
-            await message.answer(f"{error_reason}\nПожалуйста, попробуйте снова.\n\n{QUESTION_TEXT}")
-            return
-
-        # Индикация работы бота
-        await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
         status_msg = await message.answer(f"Генерирую {n} постов через Gemini, пожалуйста, подождите...")
 
         # Загрузка датасета и сборка промпта
         dataset_content = load_dataset("dataset.txt")
+        wishes_block = f"Дополнительные пожелания к темам/содержанию: {user_add}\n" if user_add else ""
+
         prompt = (
             "Роль: Автор уютного русскоязычного Telegram-канала «Interesting English».\n"
             f"Выведи ТОЛЬКО готовый текст {n} постов на основе предыдущих "
-            "(стиль, формат, логическая цепочка), старайся делать разнообразные. "
-            "Между постами обязательно вставляй строку <next> для парсинга ботом. "
+            "(стиль, формат, логическая цепочка), старайся делать разнообразные.\n"
+            "Между постами обязательно вставляй строку <next> для парсинга ботом.\n"
             "Никаких вступительных или заключительных слов, не используй Markdown и форматирование там, где он не применялся в предыдущих постах.\n"
+            f"{wishes_block}"
             "Предыдущие посты (от самого первого до последнего):\n"
             f"{dataset_content}"
         )
 
+        # Непрерывная фоновая индикация "печатает..." на все время генерации
         try:
-            raw_response = await request_gemini(prompt=prompt, ai_token=ai_token)
+            async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
+                raw_response = await request_gemini(prompt=prompt, ai_token=ai_token)
         except Exception as e:
             logging.error(f"Ошибка генерации: {e}")
             await status_msg.edit_text("Произошла ошибка при обращении к нейросети. Попробуйте позже.")
@@ -187,7 +200,6 @@ async def main():
         # Парсинг постов по маркеру <next>
         posts = [p.strip() for p in raw_response.split("<next>") if p.strip()]
 
-        # Удаляем временное статусное сообщение перед выводом постов
         try:
             await status_msg.delete()
         except Exception:
@@ -200,17 +212,15 @@ async def main():
                 post_content = f"ПОСТ №{idx}\n{post}"
                 await send_chunked_message(message, post_content)
 
-        # Возврат в начало цикла
         await message.answer(QUESTION_TEXT)
 
-    # Обработка любых других типов сообщений (стикеры, фото, голосовые)
     @dp.message()
     async def handle_other_messages(message: Message):
         user_id = message.from_user.id if message.from_user else None
         if user_id not in allowed_ids:
             await message.answer("Access Denied")
             return
-        await message.answer(f"Ожидается текстовое число от 1 до 10.\n\n{QUESTION_TEXT}")
+        await message.answer(f"Ожидается текстовое сообщение с числом от 1 до 10.\n\n{QUESTION_TEXT}")
 
     logging.info("Бот запущен и ожидает сообщений...")
     await dp.start_polling(bot)
