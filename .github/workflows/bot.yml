@@ -1,0 +1,39 @@
+name: Run Telegram Gemini Bot
+
+on:
+  schedule:
+    # Запуск каждые 5 часов (максимальное время жизни одного workflow на GitHub Actions — 6 часов)
+    - cron: '0 */5 * * *'
+  workflow_dispatch: # Возможность запустить вручную кнопкой Run workflow
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: true # Завершает предыдущий процесс при старте нового
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # Безопасная остановка до достижения жесткого лимита GitHub в 360 минут
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Bot
+        env:
+          AI_TOKEN: ${{ secrets.AI_TOKEN }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          IDS: ${{ secrets.IDS }}
+        run: |
+          python bot.py
