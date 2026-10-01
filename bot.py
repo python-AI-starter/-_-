@@ -108,7 +108,8 @@ async def request_gemini(prompt: str, ai_token: str) -> str:
             except Exception as e:
                 logging.warning(f"Ошибка при обращении к {model}: {e}")
 
-    raise RuntimeError(f"Не удалось получить ответ ни от одной из моделей: {\', \'.join(GEMINI_MODELS)}.")
+    models_str = ", ".join(GEMINI_MODELS)
+    raise RuntimeError(f"Не удалось получить ответ ни от одной из моделей: {models_str}.")
 
 
 async def send_chunked_message(message: Message, text: str, max_length: int = 4000) -> None:
