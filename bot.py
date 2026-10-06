@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import logging
 import os
 import re
@@ -15,12 +16,21 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s"
 )
 
+MONTHS_RU = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря"
+]
+YEAR_WORD = "года"
+
+ENGLISH_CHARS = {"a", "а", "e", "е"}
+CHINESE_CHARS = {"k", "к", "c", "с"}
+
 QUESTION_TEXT = (
-    "Сколько нужно сгенерировать постов "
-    "(от 1 до 10, значительно дешевле 1 раз 10 постов чем 10 раз по 1 посту)?\n\n"
+    "Укажите букву канала (а/a/е/e — английский, к/k/c/с — китайский) и количество постов "
+    "(от 1 до 20, значительно дешевле 1 раз 20 постов чем 20 раз по 1 посту).\n\n"
     "Если есть пожелания по теме, можно написать их через пробел или с новой строки после цифры, "
     "например:\n"
-    "«3 скоро Хэллоуин, придумай что-нибудь под такую атмосферу»"
+    "«а3 скоро Хэллоуин, придумай что-нибудь под такую атмосферу»"
 )
 
 # Очередь моделей: если первая перегружена или недоступна, переходит к следующей
@@ -66,8 +76,8 @@ def load_config(env_path: str = "tokens.env") -> Tuple[str, str, Set[int]]:
     return ai_token, tg_token, allowed_ids
 
 
-def load_dataset(dataset_path: str = "dataset.txt") -> str:
-    """Загружает текст из dataset.txt с сохранением форматирования."""
+def load_dataset(dataset_path: str) -> str:
+    """Загружает текст из файла датасета с сохранением форматирования."""
     if not os.path.exists(dataset_path):
         logging.warning(f"Файл {dataset_path} не найден! Будет передан пустой датасет.")
         return ""
@@ -75,15 +85,34 @@ def load_dataset(dataset_path: str = "dataset.txt") -> str:
         return f.read()
 
 
-def parse_user_input(text: str) -> Tuple[Optional[int], str]:
+def parse_user_input(text: str) -> Tuple[Optional[str], Optional[int], str]:
     """
-    Извлекает из строки число постов и опциональные пожелания к генерации.
-    Поддерживает ввод вида '3', '3 тема...', '3\\nмногострочный текст'.
+    Извлекает тип канала ('english'/'chinese'), число постов (до 20) и пожелания.
+    Формат: буква языка + число без пробела (напр. 'а3', 'k5 тема...').
     """
-    match = re.match(r"^(\d+)(?:\s+(.*))?$", text.strip(), re.DOTALL)
+    match = re.match(r"^([a-zа-яё])(\d+)(?:\s+(.*))?$", text.strip(), re.DOTALL | re.IGNORECASE)
     if not match:
-        return None, ""
-    return int(match.group(1)), (match.group(2) or "").strip()
+        return None, None, ""
+
+    channel_char = match.group(1).lower()
+    count = int(match.group(2))
+    wishes = (match.group(3) or "").strip()
+
+    if channel_char in ENGLISH_CHARS:
+        lang = "english"
+    elif channel_char in CHINESE_CHARS:
+        lang = "chinese"
+    else:
+        return None, None, ""
+
+    return lang, count, wishes
+
+
+def get_current_date_str() -> str:
+    """Возвращает дату в формате 'Сегодня 6 октября 2026 года'."""
+    now = datetime.now()
+    month_name = MONTHS_RU[now.month - 1]
+    return f"Сегодня {now.day} {month_name} {now.year} {YEAR_WORD}"
 
 
 async def request_gemini(prompt: str, ai_token: str) -> str:
@@ -159,25 +188,34 @@ async def main():
             return
 
         user_input = message.text.strip()
-        n, user_add = parse_user_input(user_input)
+        lang, n, user_add = parse_user_input(user_input)
 
-        # Валидация числа постов
-        if n is None or n < 1 or n > 10:
+        # Валидация ввода и числа постов (от 1 до 20)
+        if not lang or n is None or n < 1 or n > 20:
             error_reason = (
-                f"Не удалось распознать корректное число постов в начале вашего сообщения.\n"
-                f"Пожалуйста, укажите целое число от 1 до 10 (пожелания можно дописать следом)."
+                "Не удалось распознать букву языка и количество постов.\n"
+                "Пожалуйста, укажите букву языка (а/a/е/e — английский, к/k/c/с — китайский) "
+                "и число постов от 1 до 20 без пробела (пожелания можно дописать следом)."
             )
             await message.answer(f"{error_reason}\n\n{QUESTION_TEXT}")
             return
 
         status_msg = await message.answer(f"Генерирую {n} постов через Gemini, пожалуйста, подождите...")
 
-        # Загрузка датасета и сборка промпта
-        dataset_content = load_dataset("dataset.txt")
+        # Выбор датасета и роли канала
+        if lang == "english":
+            dataset_content = load_dataset("dataset_english.txt")
+            channel_name = "Interesting English"
+        else:
+            dataset_content = load_dataset("dataset_chinese.txt")
+            channel_name = "Interesting Chinese"
+
+        current_date_text = get_current_date_str()
         wishes_block = f"Дополнительные пожелания к темам/содержанию: {user_add}\n" if user_add else ""
 
         prompt = (
-            "Роль: Автор уютного русскоязычного Telegram-канала «Interesting English».\n"
+            f"{current_date_text}\n"
+            f"Роль: Автор уютного русскоязычного Telegram-канала «{channel_name}».\n"
             f"Выведи ТОЛЬКО готовый текст {n} постов на основе предыдущих "
             "(стиль, формат, логическая цепочка), старайся делать разнообразные.\n"
             "Между постами обязательно вставляй строку <next> для парсинга ботом.\n"
@@ -220,7 +258,7 @@ async def main():
         if user_id not in allowed_ids:
             await message.answer("Access Denied")
             return
-        await message.answer(f"Ожидается текстовое сообщение с числом от 1 до 10.\n\n{QUESTION_TEXT}")
+        await message.answer(f"Ожидается текстовое сообщение вида «а3» или «к5».\n\n{QUESTION_TEXT}")
 
     logging.info("Бот запущен и ожидает сообщений...")
     await dp.start_polling(bot)
