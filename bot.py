@@ -35,9 +35,10 @@ QUESTION_TEXT = (
 
 # Очередь моделей: если первая перегружена или недоступна, переходит к следующей
 GEMINI_MODELS = [
-    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.8-flash",
     "gemini-3-flash-preview",
-    "gemini-2.5-flash"
+    "gemini-3.5-flash-lite"
 ]
 
 
